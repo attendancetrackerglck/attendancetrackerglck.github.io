@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Class Attendance</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lucide@0.453.0/dist/umd/lucide.min.js"></script>
+<style>
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#f1f5f9;color:#0f172a}
+  .card{background:#fff;border:1px solid #e2e8f0;border-radius:.75rem;padding:1rem}
+  .inp{border:1px solid #cbd5e1;border-radius:.5rem;padding:.4rem .65rem;font-size:.9rem;background:#fff;width:100%}
+  .inp:focus,.btn:focus-visible{outline:2px solid #2563eb;outline-offset:1px}
+  .btn{display:inline-flex;align-items:center;gap:.35rem;border-radius:.5rem;padding:.45rem .85rem;font-size:.875rem;font-weight:600;background:#1e293b;color:#fff}
+  .btn:hover{background:#334155}.btn.sec{background:#fff;color:#1e293b;border:1px solid #cbd5e1}.btn.sec:hover{background:#f1f5f9}
+  .btn.ok{background:#15803d}.btn.bad{background:#b91c1c}.btn:disabled{opacity:.5}
+  .badge{display:inline-flex;min-width:1.7rem;justify-content:center;padding:.1rem .45rem;border-radius:.4rem;font-weight:700;font-size:.75rem}
+  .b-P{background:#dcfce7;color:#15803d}.b-A{background:#fee2e2;color:#b91c1c}.b-L{background:#fef3c7;color:#b45309}.b-C{background:#dbeafe;color:#1d4ed8}
+  .grid-wrap{overflow:auto;max-height:68vh;border:1px solid #e2e8f0;border-radius:.75rem;background:#fff}
+  .grid-wrap table{border-collapse:separate;border-spacing:0;font-size:.85rem;width:max-content;min-width:100%}
+  .grid-wrap th,.grid-wrap td{padding:.45rem .7rem;border-bottom:1px solid #f1f5f9;white-space:nowrap}
+  .grid-wrap thead th{position:sticky;top:0;z-index:20;background:#f8fafc;text-align:left}
+  .grid-wrap .stick{position:sticky;left:0;z-index:10;background:#fff;border-right:1px solid #e2e8f0}
+  .grid-wrap thead .stick{z-index:30;background:#f8fafc}
+  .mk{width:2.2rem;height:2rem;border-radius:.45rem;border:1px solid #cbd5e1;font-weight:700;font-size:.8rem;background:#fff;color:#64748b}
+  .mk.on-P{background:#16a34a;color:#fff;border-color:#16a34a}.mk.on-A{background:#dc2626;color:#fff;border-color:#dc2626}.mk.on-L{background:#f59e0b;color:#fff;border-color:#f59e0b}
+  th.sortable{cursor:pointer}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+/* ======================= CONFIG — paste your Supabase values ======================= */
+const CFG = {
+  URL: 'YOUR_SUPABASE_URL',          // e.g. https://abcd1234.supabase.co
+  KEY: 'YOUR_SUPABASE_ANON_KEY',     // the public "anon" key (safe to expose; Row Level Security protects the data)
+  PHONE_DOMAIN: 'phone.attendance.app', // must match phone_domain() in schema.sql
+  THRESH: 75
+};
+/* =================================================================================== */
+
+const sb = supabase.createClient(CFG.URL, CFG.KEY);
+const S = { me:null, subjects:[], teachers:[], links:[], roster:[], st:[], agg:new Map(), tab:'', unseen:0,
+            month:new Date().toLocaleDateString('en-CA').slice(0,7), perfSort:{k:'roll',d:1} };
+const $ = s => document.querySelector(s);
+const app = $('#app');
+const today = () => new Date().toLocaleDateString('en-CA');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ST_NAME = {P:'Present',A:'Absent',L:'Late',C:'Claim'};
+const pct = (a,c) => c ? a/c*100 : null;
+const low = p => p != null && p < CFG.THRESH;
+const pTxt = p => p == null ? '—' : p.toFixed(1) + '%';
+const pBadge = (p, big) => `<span class="inline-flex items-center gap-1 rounded-full font-semibold ${big?'px-3 py-1 text-lg':'px-2 py-0.5 text-xs'} ${p==null?'bg-slate-100 text-slate-500':low(p)?'bg-red-100 text-red-700 ring-1 ring-red-300':'bg-green-100 text-green-700'}">${low(p)?'⚠ ':''}${pTxt(p)}</span>`;
+const bdg = s => `<span class="badge b-${s}">${s}</span>`;
+const dLabel = d => new Date(d + 'T00:00').toLocaleDateString('en-US', {month:'short', day:'2-digit'});
+const dFull = d => new Date(d + 'T00:00').toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'numeric'});
+const sName = id => S.subjects.find(s => s.id === id)?.name ?? '?';
+const tName = id => S.teachers.find(t => t.id === id)?.name ?? '—';
+const rName = r => S.roster.find(x => x.roll_no === r)?.full_name ?? '';
+const safeUrl = u => /^https?:\/\//i.test(u || '') ? esc(u) : '';
+const icons = () => lucide.createIcons();
+function toast(t, err) {
+  const d = document.createElement('div');
+  d.className = `fixed bottom-4 right-4 z-50 max-w-sm px-4 py-2 rounded-lg shadow-lg text-sm text-white ${err ? 'bg-red-600' : 'bg-slate-800'}`;
+  d.textContent = t; document.body.appendChild(d); setTimeout(() => d.remove(), 4000);
+}
+const fail = e => { console.error(e); toast(e.message || String(e), true); };
+async function all(q) {                       // pages past the 1000-row API limit
+  let out = [], from = 0;
+  for (;;) { const { data, error } = await q(from, from + 999); if (error) throw error; out = out.concat(data); if (data.length < 1000) return out; from += 1000; }
+}
+const monthRange = ym => { const [y, m] = ym.split('-').map(Number); return [`${ym}-01`, `${ym}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`]; };
+function modal(html) {
+  const m = document.createElement('div'); m.id = 'modal';
+  m.className = 'fixed inset-0 z-40 bg-slate-900/50 flex items-center justify-center p-4';
+  m.innerHTML = `<div class="card w-full max-w-md max-h-[90vh] overflow-auto">${html}</div>`;
+  m.onclick = e => { if (e.target === m) m.remove(); };
+  document.body.appendChild(m); icons();
+}
+const closeModal = () => $('#modal')?.remove();
+
+/* ============================== AUTH ============================== */
+function ident(v) {
+  v = v.trim();
+  if (v.includes('@')) return v.toLowerCase();
+  const d = v.replace(/\D/g, '').slice(-10);
+  return d.length === 10 ? `${d}@${CFG.PHONE_DOMAIN}` : null;
+}
+function showAuth(mode = 'in', note = '') {
+  app.innerHTML = `
+  <div class="min-h-screen flex items-center justify-center p-4">
+    <div class="card w-full max-w-sm">
+      <div class="flex items-center gap-2 mb-1"><i data-lucide="graduation-cap" class="w-6 h-6 text-blue-700"></i><h1 class="text-xl font-bold">Class Attendance</h1></div>
+      <p class="text-sm text-slate-500 mb-4">${mode === 'in' ? 'Sign in with your registered email or phone number.' : 'Create your password. Only pre-registered contacts can sign up.'}</p>
+      <div id="authMsg" class="text-sm mb-3 ${note ? 'p-2 rounded bg-red-50 text-red-700' : ''}">${esc(note)}</div>
+      <label class="text-sm font-medium">Email or phone number</label>
+      <input id="aId" class="inp mb-3" autocomplete="username" placeholder="you@gmail.com or 10-digit number">
+      <label class="text-sm font-medium">Password</label>
+      <input id="aPw" type="password" class="inp mb-3" autocomplete="${mode === 'in' ? 'current-password' : 'new-password'}">
+      ${mode === 'up' ? `<label class="text-sm font-medium">Confirm password</label><input id="aPw2" type="password" class="inp mb-3" autocomplete="new-password">` : ''}
+      <button class="btn w-full justify-center" id="aGo">${mode === 'in' ? 'Sign in' : 'Create account'}</button>
+      <button class="text-sm text-blue-700 mt-3 w-full" id="aSwitch">${mode === 'in' ? 'First time? Sign up' : 'Already registered? Sign in'}</button>
+    </div>
+  </div>`;
+  icons();
+  const msg = (t, ok) => { const m = $('#authMsg'); m.className = `text-sm mb-3 p-2 rounded ${ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`; m.textContent = t; };
+  $('#aSwitch').onclick = () => showAuth(mode === 'in' ? 'up' : 'in');
+  $('#aPw').onkeydown = e => { if (e.key === 'Enter') $('#aGo').click(); };
+  $('#aGo').onclick = async () => {
+    const raw = $('#aId').value, pw = $('#aPw').value, email = ident(raw);
+    if (!email) return msg('Enter a valid email or a 10-digit phone number.');
+    if (pw.length < 8) return msg('Password must be at least 8 characters.');
+    $('#aGo').disabled = true;
+    try {
+      if (mode === 'in') {
+        const { error } = await sb.auth.signInWithPassword({ email, password: pw });
+        if (error) msg('Sign-in failed: check your email/phone and password.'); else await boot();
+      } else {
+        if (pw !== $('#aPw2').value) return msg('Passwords do not match.');
+        const { data: chk } = await sb.rpc('check_whitelist', { p_identifier: raw });
+        if (chk === 'denied' || chk == null) return msg('Access Denied: Your contact details are not registered for this class.');
+        if (chk === 'registered') return msg('This contact is already registered. Please sign in.');
+        const { data, error } = await sb.auth.signUp({ email, password: pw });
+        if (error) return msg(/Access Denied/.test(error.message) ? 'Access Denied: Your contact details are not registered for this class.' : error.message);
+        if (data.session) await boot(); else msg('Account created. Check your email to confirm, then sign in.', true);
+      }
+    } finally { $('#aGo') && ($('#aGo').disabled = false); }
+  };
+}
+async function logout() { await sb.auth.signOut(); S.me = null; if (S.chan) { sb.removeChannel(S.chan); S.chan = null; } showAuth('in'); }
+
+/* ============================== BOOT / SHELL ============================== */
+async function boot() {
+  const { data: me } = await sb.rpc('me');
+  if (!me) { await sb.auth.signOut(); return showAuth('in', 'Access Denied: Your contact details are not registered for this class.'); }
+  S.me = me; S.isCR = me.role === 'class_rep' || me.is_dev; S.isTutor = me.role === 'tutor' || me.is_dev;
+  try { await loadBase(); await loadStats(); } catch (e) { fail(e); }
+  const t = tabs(); S.tab = t[0][0];
+  shell(); go(S.tab); subscribe();
+}
+function tabs() {
+  const t = [], m = S.me;
+  if (m.roll_no) t.push(['overview', 'My Attendance', 'layout-dashboard'], ['claims', 'My Claims', 'badge-check']);
+  if (S.isCR) t.push(['timetable', 'Timetable', 'calendar-days'], ['mark', 'Mark Attendance', 'user-check']);
+  if (S.isTutor) t.push(['queue', 'Claims Queue', 'inbox'], ['perf', 'Class Performance', 'bar-chart-3'], ['audit', 'Audit Log', 'scroll-text'], ['export', 'Export', 'file-spreadsheet'], ['setup', 'Setup', 'settings']);
+  if (m.is_dev) t.push(['dev', 'Developer', 'terminal']);
+  return t;
+}
+function shell() {
+  const role = S.me.role === 'class_rep' ? 'Class Representative' : S.me.role === 'tutor' ? 'Tutor' : 'Student';
+  app.innerHTML = `
+  <header class="bg-white border-b border-slate-200 sticky top-0 z-30">
+    <div class="max-w-7xl mx-auto px-4 py-2 flex items-center justify-between gap-3">
+      <div class="flex items-center gap-2"><i data-lucide="graduation-cap" class="w-5 h-5 text-blue-700"></i><span class="font-bold">Class Attendance</span></div>
+      <div class="flex items-center gap-3 text-sm"><span class="hidden sm:block text-right leading-tight"><b>${esc(S.me.full_name)}</b><br><span class="text-slate-500 text-xs">${role}${S.me.roll_no ? ' · Roll ' + S.me.roll_no : ''}</span></span>
+        <button class="btn sec" onclick="logout()"><i data-lucide="log-out" class="w-4 h-4"></i>Sign out</button></div>
+    </div>
+    <nav id="nav" class="max-w-7xl mx-auto px-4 flex gap-1 overflow-x-auto"></nav>
+  </header>
+  <main id="view" class="max-w-7xl mx-auto p-4"></main>`;
+  drawNav();
+}
+function drawNav() {
+  $('#nav').innerHTML = tabs().map(([id, label, ic]) => `
+    <button onclick="go('${id}')" class="flex items-center gap-1.5 px-3 py-2 text-sm whitespace-nowrap border-b-2 ${S.tab === id ? 'border-blue-700 text-blue-700 font-semibold' : 'border-transparent text-slate-600 hover:text-slate-900'}">
+      <i data-lucide="${ic}" class="w-4 h-4"></i>${label}${id === 'claims' && S.unseen ? `<span class="ml-1 bg-red-600 text-white text-[10px] rounded-full px-1.5">${S.unseen}</span>` : ''}</button>`).join('');
+  icons();
+}
+const VIEWS = { overview: vOverview, claims: vClaims, timetable: vTimetable, mark: vMark, queue: vQueue, perf: vPerf, audit: vAudit, export: vExport, setup: vSetup, dev: vDev };
+async function go(id) {
+  S.tab = id; drawNav();
+  $('#view').innerHTML = '<div class="p-8 text-center text-slate-500">Loading…</div>';
+  try { await VIEWS[id](); } catch (e) { fail(e); $('#view').innerHTML = `<div class="card text-red-700">Could not load this page: ${esc(e.message)}</div>`; }
+  icons();
+}
+let liveT;
+function subscribe() {
+  if (S.chan) return;
+  const h = () => { clearTimeout(liveT); liveT = setTimeout(async () => {
+    await loadStats();
+    if (['overview', 'claims', 'queue', 'perf'].includes(S.tab)) go(S.tab);   // never re-render the marking screen (would drop unsaved marks)
+  }, 600); };
+  S.chan = sb.channel('live');
+  ['attendance', 'periods', 'claims'].forEach(t => S.chan.on('postgres_changes', { event: '*', schema: 'public', table: t }, h));
+  S.chan.subscribe();
+}
+
+/* ============================== DATA ============================== */
+async function loadBase() {
+  const [a, b, c] = await Promise.all([sb.from('subjects').select('*').order('id'), sb.from('teachers').select('*').order('name'), sb.from('subject_teachers').select('*')]);
+  [a, b, c].forEach(r => { if (r.error) throw r.error; });
+  S.subjects = a.data; S.teachers = b.data; S.links = c.data;
+  if (S.isCR || S.isTutor) { const r = await sb.rpc('get_roster'); if (r.error) throw r.error; S.roster = r.data; }
+}
+async function loadStats() {
+  S.st = await all((a, b) => sb.from('v_stats').select('*').order('roll_no').order('subject_id').range(a, b));
+  S.agg = new Map();
+  for (const r of S.st) {
+    if (!S.agg.has(r.roll_no)) S.agg.set(r.roll_no, { c: 0, a: 0, by: {} });
+    const o = S.agg.get(r.roll_no); o.c += r.conducted; o.a += r.attended; o.by[r.subject_id] = { c: r.conducted, a: r.attended };
+  }
+  if (S.me.roll_no) {
+    const { count } = await sb.from('claims').select('id', { count: 'exact', head: true }).eq('roll_no', S.me.roll_no).eq('seen', false);
+    S.unseen = count || 0; if ($('#nav')) drawNav();
+  }
+}
+const aggOf = roll => S.agg.get(roll) || { c: 0, a: 0, by: {} };
+const teachersOf = sid => S.links.filter(l => l.subject_id === sid).map(l => S.teachers.find(t => t.id === l.teacher_id)).filter(Boolean);
+
+/* ============================== STUDENT ============================== */
+async function vOverview() {
+  const a = aggOf(S.me.roll_no), tot = pct(a.a, a.c);
+  const cards = S.subjects.map(s => { const x = a.by[s.id] || { c: 0, a: 0 };
+    return `<div class="card"><div class="text-sm text-slate-600 truncate" title="${esc(s.name)}">${esc(s.name)}</div><div class="mt-1">${pBadge(pct(x.a, x.c), true)}</div><div class="text-xs text-slate-500 mt-2">Classes taken ${x.c} · attended ${x.a}</div></div>`; }).join('');
+  $('#view').innerHTML = `
+    <div class="grid gap-3 md:grid-cols-4 mb-4">
+      <div class="card md:col-span-1 ${low(tot) ? 'border-red-300 bg-red-50' : ''}"><div class="text-sm text-slate-600">Overall attendance</div><div class="mt-1">${pBadge(tot, true)}</div>
+        <div class="text-xs text-slate-500 mt-2">${a.a} of ${a.c} hours attended</div>
+        ${low(tot) ? `<div class="text-xs text-red-700 mt-2 font-medium">Below ${CFG.THRESH}% — detention risk</div>` : ''}</div>
+      <div class="md:col-span-3 grid gap-3 grid-cols-2 lg:grid-cols-3">${cards}</div>
+    </div>
+    <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+      <h2 class="font-semibold">Date-wise attendance</h2>
+      <div class="flex items-center gap-3 text-xs">${['P','A','L','C'].map(s => `${bdg(s)} ${ST_NAME[s]}`).join(' ')}
+        <input id="gm" type="month" class="inp !w-auto" value="${S.month}"></div></div>
+    <div id="grid"></div>`;
+  $('#gm').onchange = e => { S.month = e.target.value || S.month; drawGrid(); };
+  await drawGrid();
+}
+async function drawGrid() {
+  const [from, to] = monthRange(S.month);
+  const rows = await all((a, b) => sb.from('attendance').select('period_id,status,periods!inner(date,slot,subject_id)')
+    .eq('roll_no', S.me.roll_no).gte('periods.date', from).lte('periods.date', to).order('period_id').range(a, b));
+  const dates = [...new Set(rows.map(r => r.periods.date))].sort(), cell = {};
+  rows.forEach(r => { const k = r.periods.subject_id + '|' + r.periods.date; (cell[k] ||= []).push(r); });
+  if (!dates.length) { $('#grid').innerHTML = '<div class="card text-slate-500 text-center">No marked classes in this month.</div>'; return; }
+  $('#grid').innerHTML = `<div class="grid-wrap"><table><thead><tr><th class="stick">Subject</th>${dates.map(d => `<th class="text-center">${dLabel(d)}</th>`).join('')}</tr></thead><tbody>
+    ${S.subjects.map(s => `<tr><td class="stick font-medium">${esc(s.name)}</td>${dates.map(d => {
+      const c = (cell[s.id + '|' + d] || []).sort((x, y) => x.periods.slot - y.periods.slot);
+      return `<td class="text-center">${c.length ? c.map(r => bdg(r.status)).join('<span class="text-slate-300 mx-1">|</span>') : '<span class="text-slate-300">–</span>'}</td>`; }).join('')}</tr>`).join('')}
+    </tbody></table></div>`;
+}
+async function vClaims() {
+  const rows = await all((a, b) => sb.from('claims').select('*').eq('roll_no', S.me.roll_no).order('created_at', { ascending: false }).range(a, b));
+  const pids = [...new Set(rows.map(r => r.period_id))];
+  const per = pids.length ? (await sb.from('periods').select('id,date,slot,subject_id').in('id', pids)).data || [] : [];
+  const P = Object.fromEntries(per.map(p => [p.id, p]));
+  const col = { pending: 'bg-amber-100 text-amber-800', approved: 'bg-green-100 text-green-800', rejected: 'bg-red-100 text-red-800' };
+  $('#view').innerHTML = `
+    <div class="flex items-center justify-between mb-3"><h2 class="font-semibold">Claim status</h2><button class="btn" onclick="claimForm()"><i data-lucide="plus" class="w-4 h-4"></i>Claim attendance</button></div>
+    <div class="grid gap-3">${rows.map(r => { const p = P[r.period_id];
+      return `<div class="card"><div class="flex flex-wrap justify-between gap-2"><div><b>${esc(r.event_name)}</b>
+        <div class="text-sm text-slate-600">${p ? `${dFull(p.date)} · Period ${p.slot} · ${esc(sName(p.subject_id))}` : ''} · was ${esc(ST_NAME[r.original_status] || '')}</div></div>
+        <span class="self-start px-2 py-0.5 rounded-full text-xs font-semibold capitalize ${col[r.status]}">${r.status}</span></div>
+        ${r.notes ? `<p class="text-sm mt-2 whitespace-pre-wrap">${esc(r.notes)}</p>` : ''}
+        ${safeUrl(r.proof_url) ? `<a class="text-sm text-blue-700 underline" href="${safeUrl(r.proof_url)}" target="_blank" rel="noopener noreferrer">Proof link</a>` : ''}
+        ${r.review_note ? `<p class="text-sm mt-2 p-2 bg-slate-50 rounded">Tutor: ${esc(r.review_note)}</p>` : ''}</div>`; }).join('') || '<div class="card text-slate-500 text-center">No claims yet. Use “Claim attendance” for duty leave or events.</div>'}</div>`;
+  if (rows.some(r => !r.seen)) { await sb.from('claims').update({ seen: true }).eq('roll_no', S.me.roll_no).eq('seen', false); S.unseen = 0; drawNav(); }
+}
+async function claimForm() {
+  const mine = await all((a, b) => sb.from('attendance').select('period_id,status,periods!inner(date,slot,subject_id)').eq('roll_no', S.me.roll_no).in('status', ['A', 'L']).order('period_id', { ascending: false }).range(a, b));
+  const pend = new Set((await sb.from('claims').select('period_id').eq('roll_no', S.me.roll_no).eq('status', 'pending')).data?.map(x => x.period_id));
+  const opts = mine.filter(r => !pend.has(r.period_id)).sort((x, y) => (y.periods.date + y.periods.slot).localeCompare(x.periods.date + x.periods.slot));
+  if (!opts.length) return toast('You have no Absent or Late hours to claim.');
+  modal(`<h3 class="font-bold mb-3">Claim attendance</h3>
+    <label class="text-sm font-medium">Hour</label>
+    <select id="cP" class="inp mb-3">${opts.map(r => `<option value="${r.period_id}">${dFull(r.periods.date)} · Period ${r.periods.slot} · ${esc(sName(r.periods.subject_id))} (${ST_NAME[r.status]})</option>`).join('')}</select>
+    <label class="text-sm font-medium">Event name</label><input id="cE" class="inp mb-3" maxlength="120" placeholder="Moot Court, Sports Meet…">
+    <label class="text-sm font-medium">Notes</label><textarea id="cN" class="inp mb-3" rows="3" maxlength="1000" placeholder="Details for the tutor"></textarea>
+    <label class="text-sm font-medium">Proof link (optional)</label><input id="cU" class="inp mb-4" placeholder="https://…">
+    <div class="flex justify-end gap-2"><button class="btn sec" onclick="closeModal()">Cancel</button><button class="btn" id="cGo">Submit claim</button></div>`);
+  $('#cGo').onclick = async () => {
+    const ev = $('#cE').value.trim(), url = $('#cU').value.trim();
+    if (ev.length < 2) return toast('Enter the event name.', true);
+    if (url && !/^https?:\/\//i.test(url)) return toast('Proof link must start with http:// or https://', true);
+    const { error } = await sb.from('claims').insert({ period_id: +$('#cP').value, roll_no: S.me.roll_no, event_name: ev, notes: $('#cN').value.trim() || null, proof_url: url || null });
+    if (error) return fail(error);
+    closeModal(); toast('Claim submitted'); go('claims');
+  };
+}
+
+/* ============================== CLASS REP ============================== */
+async function vTimetable() {
+  S.ttDate ||= today();
+  $('#view').innerHTML = `<div class="card max-w-3xl"><div class="flex flex-wrap items-end justify-between gap-3 mb-3"><h2 class="font-semibold">Timetable builder</h2>
+    <label class="text-sm">Date <input id="ttD" type="date" class="inp !w-auto" value="${S.ttDate}"></label></div>
+    <p class="text-sm text-slate-500 mb-3">Fill only the hours that are actually held (up to 6). Clear a row to remove that hour.</p>
+    <div id="ttRows" class="grid gap-2"></div><div class="mt-4 flex justify-end"><button class="btn" id="ttSave"><i data-lucide="save" class="w-4 h-4"></i>Save day</button></div></div>`;
+  $('#ttD').onchange = e => { S.ttDate = e.target.value; loadTT(); };
+  $('#ttSave').onclick = saveTT;
+  await loadTT();
+}
+async function loadTT() {
+  const { data, error } = await sb.from('periods').select('*').eq('date', S.ttDate).order('slot'); if (error) return fail(error);
+  S.ttOld = Object.fromEntries(data.map(p => [p.slot, p]));
+  $('#ttRows').innerHTML = [1, 2, 3, 4, 5, 6].map(n => { const p = S.ttOld[n];
+    return `<div class="grid grid-cols-[4.5rem_1fr_1fr] gap-2 items-center"><span class="text-sm font-medium">Hour ${n}</span>
+      <select id="ts${n}" class="inp" onchange="ttTeachers(${n})"><option value="">— none —</option>${S.subjects.map(s => `<option value="${s.id}" ${p?.subject_id === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+      <select id="tt${n}" class="inp"></select></div>`; }).join('');
+  [1, 2, 3, 4, 5, 6].forEach(n => ttTeachers(n, S.ttOld[n]?.teacher_id));
+}
+function ttTeachers(n, keep) {
+  const sid = +$('#ts' + n).value, el = $('#tt' + n), ts = sid ? teachersOf(sid) : [];
+  el.disabled = !sid; el.innerHTML = !sid ? '<option value="">—</option>' : ts.length ? ts.map(t => `<option value="${t.id}" ${t.id === keep ? 'selected' : ''}>${esc(t.name)}</option>`).join('') : '<option value="">No teacher assigned</option>';
+}
+async function saveTT() {
+  const ops = [];
+  for (let n = 1; n <= 6; n++) {
+    const sid = +$('#ts' + n).value || null, tid = +$('#tt' + n).value || null, old = S.ttOld[n];
+    if (sid && teachersOf(sid).length && !tid) return toast(`Hour ${n}: choose a teacher.`, true);
+    if (!sid && old) ops.push(() => sb.from('periods').delete().eq('id', old.id));
+    else if (sid && !old) ops.push(() => sb.from('periods').insert({ date: S.ttDate, slot: n, subject_id: sid, teacher_id: tid }));
+    else if (sid && old && (old.subject_id !== sid || old.teacher_id !== tid)) ops.push(() => sb.from('periods').update({ subject_id: sid, teacher_id: tid }).eq('id', old.id));
+  }
+  if (!ops.length) return toast('No changes to save.');
+  if (Object.keys(S.ttOld).some(n => !+$('#ts' + n).value) && !confirm('Removing an hour also deletes any attendance marked for it. Continue?')) return;
+  for (const op of ops) { const { error } = await op(); if (error) return fail(error); }
+  toast('Timetable saved'); await loadStats(); loadTT();
+}
+
+async function vMark() {
+  S.mkDate ||= today();
+  $('#view').innerHTML = `<div class="card mb-3 flex flex-wrap items-end gap-3"><label class="text-sm">Date <input id="mkD" type="date" class="inp !w-auto" value="${S.mkDate}"></label><div id="mkP" class="flex flex-wrap gap-2"></div></div><div id="mkB"></div>`;
+  $('#mkD').onchange = e => { S.mkDate = e.target.value; S.mkPeriod = null; loadMkPeriods(); };
+  await loadMkPeriods();
+}
+async function loadMkPeriods() {
+  const { data, error } = await sb.from('periods').select('*').eq('date', S.mkDate).order('slot'); if (error) return fail(error);
+  S.dayP = data; if (!data.find(p => p.id === S.mkPeriod)) S.mkPeriod = data[0]?.id ?? null;
+  await loadMarks();
+}
+async function loadMarks() {
+  S.marks = {};
+  if (S.mkPeriod) { const { data, error } = await sb.from('attendance').select('roll_no,status').eq('period_id', S.mkPeriod); if (error) return fail(error); data.forEach(r => S.marks[r.roll_no] = r.status); }
+  drawMark();
+}
+function pickPeriod(id) { S.mkPeriod = id; loadMarks(); }
+function setMark(roll, s) { if (S.marks[roll] === 'C') return; S.marks[roll] = s; drawMark(true); }
+function allPresent() { S.roster.forEach(r => { if (!r.perm_absent && S.marks[r.roll_no] !== 'C') S.marks[r.roll_no] = 'P'; }); drawMark(true); }
+function drawMark(keepScroll) {
+  $('#mkP').innerHTML = S.dayP.map(p => `<button class="btn ${p.id === S.mkPeriod ? '' : 'sec'}" onclick="pickPeriod(${p.id})">Hour ${p.slot} · ${esc(sName(p.subject_id))}</button>`).join('');
+  if (!S.dayP.length) { $('#mkB').innerHTML = '<div class="card text-slate-500 text-center">No hours scheduled for this date. Add them in the Timetable tab first.</div>'; return; }
+  const per = S.dayP.find(p => p.id === S.mkPeriod), cnt = { P: 0, A: 0, L: 0, C: 0, none: 0 };
+  S.roster.forEach(r => { const s = r.perm_absent ? 'A' : S.marks[r.roll_no]; s ? cnt[s]++ : cnt.none++; });
+  const marked = S.roster.length - cnt.none, live = pct(cnt.P + cnt.C, marked);
+  const sc = $('.grid-wrap')?.scrollTop || 0;
+  $('#mkB').innerHTML = `<div class="card mb-3 flex flex-wrap items-center justify-between gap-3">
+      <div class="text-sm"><b>${esc(sName(per.subject_id))}</b> · ${esc(tName(per.teacher_id))} · Hour ${per.slot}
+        <div class="mt-1 flex flex-wrap items-center gap-2">${['P', 'A', 'L', 'C'].map(s => `${bdg(s)} ${cnt[s]}`).join(' ')}<span class="text-slate-500">Unmarked ${cnt.none}</span><span>Class this hour: ${pBadge(live)}</span></div></div>
+      <div class="flex gap-2"><button class="btn sec" onclick="allPresent()"><i data-lucide="check-check" class="w-4 h-4"></i>Mark all present</button>
+        <button class="btn ok" id="mkSave"><i data-lucide="save" class="w-4 h-4"></i>Save attendance</button></div></div>
+    <div class="grid-wrap"><table><thead><tr><th class="stick">Roll · Name</th><th>Mark</th><th>Overall</th></tr></thead><tbody>
+    ${S.roster.map(r => { const s = S.marks[r.roll_no], o = aggOf(r.roll_no);
+      const ctl = r.perm_absent ? `${bdg('A')} <span class="text-xs text-slate-500 ml-1">Permanent absentee</span>`
+        : s === 'C' ? `${bdg('C')} <span class="text-xs text-slate-500 ml-1">Approved claim (locked)</span>`
+        : ['P', 'A', 'L'].map(x => `<button class="mk ${s === x ? 'on-' + x : ''}" onclick="setMark(${r.roll_no},'${x}')" aria-label="${ST_NAME[x]}">${x}</button>`).join(' ');
+      return `<tr><td class="stick"><b>${r.roll_no}</b> · ${esc(r.full_name)}</td><td><div class="flex items-center gap-1">${ctl}</div></td><td>${pBadge(pct(o.a, o.c))}</td></tr>`; }).join('')}
+    </tbody></table></div>`;
+  icons(); if (keepScroll) $('.grid-wrap').scrollTop = sc;
+  $('#mkSave').onclick = saveMarks;
+}
+async function saveMarks() {
+  const un = S.roster.filter(r => !r.perm_absent && !S.marks[r.roll_no]).length;
+  if (un && !confirm(`${un} student(s) are unmarked and will be saved as Absent. Continue?`)) return;
+  const marks = {}; S.roster.forEach(r => { if (S.marks[r.roll_no] && S.marks[r.roll_no] !== 'C') marks[r.roll_no] = S.marks[r.roll_no]; });
+  $('#mkSave').disabled = true;
+  const { data, error } = await sb.rpc('save_attendance', { p_period: S.mkPeriod, p_marks: marks });
+  if (error) { $('#mkSave').disabled = false; return fail(error); }
+  toast(`Saved: ${data.marked} newly marked, ${data.changed} changed`);
+  await loadStats(); await loadMarks();
+}
+
+/* ============================== TUTOR ============================== */
+async function vQueue() {
+  const show = S.qAll ? ['pending', 'approved', 'rejected'] : ['pending'];
+  const rows = await all((a, b) => sb.from('claims').select('*').in('status', show).order('created_at', { ascending: false }).range(a, b));
+  const pids = [...new Set(rows.map(r => r.period_id))];
+  const per = pids.length ? (await sb.from('periods').select('id,date,slot,subject_id').in('id', pids)).data || [] : [];
+  const P = Object.fromEntries(per.map(p => [p.id, p]));
+  $('#view').innerHTML = `<div class="flex items-center justify-between mb-3"><h2 class="font-semibold">Claims queue <span class="text-slate-500 font-normal">(${rows.filter(r => r.status === 'pending').length} pending)</span></h2>
+    <label class="text-sm flex items-center gap-2"><input type="checkbox" ${S.qAll ? 'checked' : ''} onchange="S.qAll=this.checked;go('queue')">Show reviewed</label></div>
+    <div class="grid gap-3 md:grid-cols-2">${rows.map(r => { const p = P[r.period_id];
+      return `<div class="card"><div class="flex justify-between gap-2"><div><b>Roll ${r.roll_no} · ${esc(rName(r.roll_no))}</b>
+        <div class="text-sm text-slate-600">${p ? `${dFull(p.date)} · Period ${p.slot} · ${esc(sName(p.subject_id))}` : ''}</div></div>${bdg(r.original_status || 'A')}</div>
+        <div class="mt-2 font-medium">${esc(r.event_name)}</div>
+        ${r.notes ? `<p class="text-sm mt-1 whitespace-pre-wrap">${esc(r.notes)}</p>` : ''}
+        ${safeUrl(r.proof_url) ? `<a class="text-sm text-blue-700 underline" href="${safeUrl(r.proof_url)}" target="_blank" rel="noopener noreferrer">Open proof</a>` : '<div class="text-xs text-slate-400">No proof link</div>'}
+        ${r.status === 'pending' ? `<input id="rn${r.id}" class="inp mt-3" placeholder="Note to student (optional)"><div class="flex gap-2 mt-2">
+          <button class="btn ok" onclick="review(${r.id},true)">Approve</button><button class="btn bad" onclick="review(${r.id},false)">Reject</button></div>`
+        : `<div class="mt-2 text-sm capitalize font-semibold ${r.status === 'approved' ? 'text-green-700' : 'text-red-700'}">${r.status}${r.review_note ? `<span class="font-normal text-slate-600 normal-case"> — ${esc(r.review_note)}</span>` : ''}</div>`}</div>`; }).join('')
+      || '<div class="card text-slate-500 text-center md:col-span-2">No claims to review.</div>'}</div>`;
+}
+async function review(id, ok) {
+  const { error } = await sb.rpc('review_claim', { p_claim: id, p_approve: ok, p_note: $('#rn' + id)?.value.trim() || null });
+  if (error) return fail(error);
+  toast(ok ? 'Claim approved — slot changed to C' : 'Claim rejected'); await loadStats(); go('queue');
+}
+
+async function vAudit() {
+  S.auditN ||= 100;
+  const { data, error } = await sb.from('audit_log').select('*').order('id', { ascending: false }).limit(S.auditN); if (error) throw error;
+  const f = S.auditF || '';
+  const acts = [...new Set(data.map(r => r.action))].sort();
+  const rows = f ? data.filter(r => r.action === f) : data;
+  $('#view').innerHTML = `<div class="flex flex-wrap items-center justify-between gap-2 mb-3"><h2 class="font-semibold">Audit log <span class="text-slate-500 font-normal">(read-only, newest first)</span></h2>
+    <div class="flex gap-2"><select class="inp !w-auto" onchange="S.auditF=this.value;go('audit')"><option value="">All actions</option>${acts.map(a => `<option ${a === f ? 'selected' : ''}>${esc(a)}</option>`).join('')}</select>
+    <button class="btn sec" onclick="go('audit')"><i data-lucide="refresh-cw" class="w-4 h-4"></i>Refresh</button></div></div>
+    <div class="grid-wrap"><table><thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Details</th></tr></thead><tbody>
+    ${rows.map(r => `<tr><td>${new Date(r.at).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
+      <td>${esc(r.actor_name)} <span class="text-xs text-slate-500">(${esc(r.actor_role)})</span></td><td>${esc(r.action)}</td><td class="!whitespace-normal min-w-[22rem]">${esc(r.details)}</td></tr>`).join('') || '<tr><td colspan="4" class="text-center text-slate-500">No entries.</td></tr>'}
+    </tbody></table></div>
+    ${data.length >= S.auditN ? `<div class="text-center mt-3"><button class="btn sec" onclick="S.auditN+=100;go('audit')">Load older entries</button></div>` : ''}`;
+}
+
+function perfRows() {
+  return S.roster.map(r => { const o = aggOf(r.roll_no);
+    return { roll: r.roll_no, name: r.full_name, abs: r.perm_absent, c: o.c, a: o.a, tot: pct(o.a, o.c), subs: S.subjects.map(s => { const x = o.by[s.id]; return x ? pct(x.a, x.c) : null; }) }; });
+}
+function vPerf() {
+  const rows = perfRows(), act = rows.filter(r => !r.abs && r.c > 0);
+  const risk = act.filter(r => low(r.tot)), near = act.filter(r => !low(r.tot) && r.tot < CFG.THRESH + 5);
+  const avg = act.length ? act.reduce((s, r) => s + r.tot, 0) / act.length : null;
+  const { k, d } = S.perfSort, val = r => k === 'roll' ? r.roll : k === 'name' ? r.name.toLowerCase() : k === 'tot' ? (r.tot ?? -1) : (r.subs[+k.slice(1)] ?? -1);
+  rows.sort((x, y) => (val(x) > val(y) ? 1 : val(x) < val(y) ? -1 : 0) * d);
+  const th = (key, label) => `<th class="sortable" onclick="sortPerf('${key}')">${label}${k === key ? (d > 0 ? ' ▲' : ' ▼') : ''}</th>`;
+  $('#view').innerHTML = `<div class="grid gap-3 sm:grid-cols-3 mb-4">
+    <div class="card"><div class="text-sm text-slate-600">Class average (excl. permanent absentees)</div><div class="mt-1">${pBadge(avg, true)}</div></div>
+    <div class="card ${risk.length ? 'border-red-300 bg-red-50' : ''}"><div class="text-sm text-slate-600">Below ${CFG.THRESH}% — detention risk</div><div class="text-2xl font-bold ${risk.length ? 'text-red-700' : ''}">${risk.length}</div><div class="text-xs text-slate-500">${risk.slice(0, 8).map(r => r.roll).join(', ')}${risk.length > 8 ? '…' : ''}</div></div>
+    <div class="card"><div class="text-sm text-slate-600">Within 5 points of the limit</div><div class="text-2xl font-bold text-amber-600">${near.length}</div><div class="text-xs text-slate-500">${near.slice(0, 8).map(r => r.roll).join(', ')}${near.length > 8 ? '…' : ''}</div></div></div>
+    <div class="grid-wrap"><table><thead><tr>${th('roll', 'Roll')}${th('name', 'Name')}${th('tot', 'Overall')}${S.subjects.map((s, i) => th('s' + i, esc(s.name))).join('')}<th>Attended / Conducted</th></tr></thead><tbody>
+    ${rows.map(r => `<tr><td class="stick font-semibold">${r.roll}</td><td>${esc(r.name)}${r.abs ? ' <span class="text-xs text-slate-500">(permanent absentee)</span>' : ''}</td><td>${pBadge(r.tot)}</td>${r.subs.map(p => `<td>${pBadge(p)}</td>`).join('')}<td>${r.a} / ${r.c}</td></tr>`).join('')}
+    </tbody></table></div>`;
+}
+function sortPerf(key) { S.perfSort = { k: key, d: S.perfSort.k === key ? -S.perfSort.d : 1 }; vPerf(); icons(); }
+
+function vExport() {
+  const now = new Date(), y = now.getFullYear();
+  $('#view').innerHTML = `<div class="card max-w-md"><h2 class="font-semibold mb-3">Export monthly report</h2>
+    <div class="grid grid-cols-2 gap-3 mb-4"><label class="text-sm">Month<select id="xm" class="inp">${Array.from({ length: 12 }, (_, i) => `<option value="${i + 1}" ${i === now.getMonth() ? 'selected' : ''}>${new Date(2000, i).toLocaleString('en', { month: 'long' })}</option>`).join('')}</select></label>
+    <label class="text-sm">Year<select id="xy" class="inp">${[y - 1, y, y + 1].map(v => `<option ${v === y ? 'selected' : ''}>${v}</option>`).join('')}</select></label></div>
+    <button class="btn" id="xGo"><i data-lucide="download" class="w-4 h-4"></i>Export Monthly Report</button></div>`;
+  $('#xGo').onclick = doExport;
+}
+async function doExport() {
+  const ym = `${$('#xy').value}-${String($('#xm').value).padStart(2, '0')}`, [from, to] = monthRange(ym);
+  $('#xGo').disabled = true;
+  try {
+    const rows = await all((a, b) => sb.from('attendance').select('roll_no,status,period_id,periods!inner(date,slot,subject_id)').gte('periods.date', from).lte('periods.date', to).order('period_id').order('roll_no').range(a, b));
+    if (!rows.length) return toast('No marked attendance in that month.', true);
+    const key = (r, p) => r + '|' + p, M = new Map(rows.map(r => [key(r.roll_no, r.period_id), r.status]));
+    const per = new Map(); rows.forEach(r => per.set(r.period_id, r.periods));
+    const bySub = {}; S.subjects.forEach(s => bySub[s.id] = []);
+    [...per.entries()].sort((a, b) => (a[1].date + a[1].slot).localeCompare(b[1].date + b[1].slot)).forEach(([id, p]) => bySub[p.subject_id]?.push({ id, ...p }));
+    const calc = (roll, sid) => { let c = 0, a = 0; (bySub[sid] || []).forEach(p => { const s = M.get(key(roll, p.id)); if (s) { c++; if (s === 'P' || s === 'C') a++; } }); return { c, a }; };
+    const r2 = v => v == null ? '' : Math.round(v * 100) / 100;
+    const wb = XLSX.utils.book_new();
+    const sum = [['Roll No', 'Student Name', ...S.subjects.map(s => s.name + ' %'), 'Total Conducted', 'Total Attended', 'Overall %']];
+    S.roster.forEach(st => { let tc = 0, ta = 0; const ps = S.subjects.map(s => { const x = calc(st.roll_no, s.id); tc += x.c; ta += x.a; return r2(pct(x.a, x.c)); }); sum.push([st.roll_no, st.full_name, ...ps, tc, ta, r2(pct(ta, tc))]); });
+    const ws1 = XLSX.utils.aoa_to_sheet(sum); ws1['!cols'] = [{ wch: 8 }, { wch: 30 }, ...S.subjects.map(() => ({ wch: 14 })), { wch: 16 }, { wch: 15 }, { wch: 11 }]; XLSX.utils.book_append_sheet(wb, ws1, 'Consolidated Summary');
+    const used = new Set(['Consolidated Summary']);
+    S.subjects.forEach((s, i) => {
+      const cols = bySub[s.id], head = ['Roll No', 'Student Name', ...cols.map(p => `${dLabel(p.date)} H${p.slot}`), 'Attended', 'Conducted', 'Subject %'], data = [head];
+      S.roster.forEach(st => { const x = calc(st.roll_no, s.id); data.push([st.roll_no, st.full_name, ...cols.map(p => M.get(key(st.roll_no, p.id)) || ''), x.a, x.c, r2(pct(x.a, x.c))]); });
+      let nm = (s.name.replace(/[\\\/\?\*\[\]:]/g, ' ').trim() || 'Subject ' + (i + 1)).slice(0, 31), n = 2; while (used.has(nm)) nm = nm.slice(0, 28) + ' ' + n++; used.add(nm);
+      const ws = XLSX.utils.aoa_to_sheet(data); ws['!cols'] = [{ wch: 8 }, { wch: 30 }, ...cols.map(() => ({ wch: 9 })), { wch: 10 }, { wch: 11 }, { wch: 11 }]; ws['!freeze'] = { xSplit: 2, ySplit: 1 };
+      XLSX.utils.book_append_sheet(wb, ws, nm);
+    });
+    XLSX.writeFile(wb, `Attendance_${ym}.xlsx`); toast('Report downloaded');
+  } catch (e) { fail(e); } finally { $('#xGo').disabled = false; }
+}
+
+async function vSetup() {
+  $('#view').innerHTML = `<div class="grid gap-4 lg:grid-cols-3">
+    <div class="card lg:col-span-1"><h2 class="font-semibold mb-2">Teachers</h2>
+      <div class="flex gap-2 mb-3"><input id="nt" class="inp" placeholder="Teacher name"><button class="btn" onclick="addTeacher()">Add</button></div>
+      <ul class="text-sm divide-y">${S.teachers.map(t => `<li class="flex justify-between items-center py-1.5">${esc(t.name)}<button class="text-red-600" onclick="delTeacher(${t.id})" aria-label="Delete"><i data-lucide="trash-2" class="w-4 h-4"></i></button></li>`).join('') || '<li class="text-slate-500">No teachers yet.</li>'}</ul></div>
+    <div class="lg:col-span-2 grid gap-3 sm:grid-cols-2">${S.subjects.map(s => `<div class="card"><input id="sn${s.id}" class="inp font-semibold mb-2" value="${esc(s.name)}">
+      <div class="text-xs text-slate-500 mb-1">Teachers (1 to 3)</div>
+      ${S.teachers.map(t => `<label class="flex items-center gap-2 text-sm py-0.5"><input type="checkbox" class="sl${s.id}" value="${t.id}" ${S.links.some(l => l.subject_id === s.id && l.teacher_id === t.id) ? 'checked' : ''}>${esc(t.name)}</label>`).join('') || '<div class="text-sm text-slate-500">Add teachers first.</div>'}
+      <button class="btn mt-2" onclick="saveSubject(${s.id})">Save</button></div>`).join('')}</div></div>`;
+}
+async function addTeacher() { const n = $('#nt').value.trim(); if (!n) return; const { error } = await sb.from('teachers').insert({ name: n }); if (error) return fail(error); await loadBase(); go('setup'); }
+async function delTeacher(id) { if (!confirm('Delete this teacher? Past periods keep their date but lose the teacher name.')) return; const { error } = await sb.from('teachers').delete().eq('id', id); if (error) return fail(error); await loadBase(); go('setup'); }
+async function saveSubject(id) {
+  const name = $('#sn' + id).value.trim(), want = [...document.querySelectorAll('.sl' + id + ':checked')].map(x => +x.value);
+  if (!name) return toast('Enter a subject name.', true);
+  if (want.length < 1 || want.length > 3) return toast('Pick 1 to 3 teachers for this subject.', true);
+  const have = S.links.filter(l => l.subject_id === id).map(l => l.teacher_id);
+  let r = await sb.from('subjects').update({ name }).eq('id', id); if (r.error) return fail(r.error);
+  const rem = have.filter(t => !want.includes(t)); if (rem.length) { r = await sb.from('subject_teachers').delete().eq('subject_id', id).in('teacher_id', rem); if (r.error) return fail(r.error); }
+  const add = want.filter(t => !have.includes(t)).map(t => ({ subject_id: id, teacher_id: t })); if (add.length) { r = await sb.from('subject_teachers').insert(add); if (r.error) return fail(r.error); }
+  toast('Subject saved'); await loadBase(); go('setup');
+}
+
+/* ============================== DEVELOPER (hidden) ============================== */
+async function vDev() {
+  const { data, error } = await sb.from('allowed_users').select('*').order('roll_no', { nullsFirst: true }); if (error) throw error;
+  const row = u => `<tr data-id="${u?.id ?? ''}"><td><input class="inp !w-16" data-f="roll_no" value="${u?.roll_no ?? ''}"></td><td><input class="inp !w-48" data-f="full_name" value="${esc(u?.full_name ?? '')}"></td>
+    <td><input class="inp !w-56" data-f="email" value="${esc(u?.email ?? '')}"></td><td><input class="inp !w-32" data-f="phone" value="${esc(u?.phone ?? '')}"></td>
+    <td><select class="inp !w-32" data-f="role">${['student', 'class_rep', 'tutor'].map(r => `<option ${u?.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select></td>
+    <td class="text-center"><input type="checkbox" data-f="perm_absent" ${u?.perm_absent ? 'checked' : ''}></td><td class="text-center">${u ? (u.user_id ? '✓' : '–') : ''}</td>
+    <td><button class="btn" onclick="saveWl(this)">${u ? 'Save' : 'Add'}</button> ${u ? `<button class="btn bad" onclick="delWl(${u.id})">Delete</button>` : ''}</td></tr>`;
+  $('#view').innerHTML = `<h2 class="font-semibold mb-1">Whitelist (allowed_users)</h2><p class="text-sm text-slate-500 mb-3">Phone numbers: digits only. Deleting a row does not delete an existing login; remove the user in the Supabase dashboard too.</p>
+    <div class="grid-wrap"><table><thead><tr><th>Roll</th><th>Name</th><th>Email</th><th>Phone</th><th>Role</th><th>Absent</th><th>Linked</th><th></th></tr></thead><tbody>${row(null)}${data.map(row).join('')}</tbody></table></div>`;
+}
+async function saveWl(btn) {
+  const tr = btn.closest('tr'), id = tr.dataset.id, v = {};
+  tr.querySelectorAll('[data-f]').forEach(e => v[e.dataset.f] = e.type === 'checkbox' ? e.checked : e.value.trim());
+  const rec = { roll_no: v.roll_no ? +v.roll_no : null, full_name: v.full_name, email: v.email ? v.email.toLowerCase() : null, phone: v.phone ? v.phone.replace(/\D/g, '') : null, role: v.role, perm_absent: v.perm_absent };
+  if (!rec.full_name) return toast('Name is required.', true);
+  const { error } = id ? await sb.from('allowed_users').update(rec).eq('id', id) : await sb.from('allowed_users').insert(rec);
+  if (error) return fail(error); toast('Whitelist saved'); go('dev');
+}
+async function delWl(id) { if (!confirm('Delete this whitelist row?')) return; const { error } = await sb.from('allowed_users').delete().eq('id', id); if (error) return fail(error); go('dev'); }
+
+/* ============================== START ============================== */
+(async () => {
+  if (CFG.URL.startsWith('YOUR_')) { app.innerHTML = '<div class="p-8 text-center text-red-700">Set CFG.URL and CFG.KEY in index.html first.</div>'; return; }
+  sb.auth.onAuthStateChange(ev => { if (ev === 'SIGNED_OUT' && S.me) { S.me = null; showAuth('in'); } });
+  const { data: { session } } = await sb.auth.getSession();
+  session ? await boot() : showAuth('in');
+})();
+</script>
+</body>
+</html>
